@@ -1,0 +1,107 @@
+Qianying Lin
+Step1: create table in HUE. The following is resulsts.
+—hbase shell
+
+create 'trip', {NAME=>'tripfam'}
+
+cd home
+curl -o 201508_trip_data.csv http://www.utdallas.edu/~axn112530/cs6350/data/bikeShare/201508_trip_data.csv
+
+curl -o spark-hbase-connector.jar http://central.maven.org/maven2/it/nerdammer/bigdata/spark-hbase-connector_2.10/0.9.2/spark-hbase-connector_2.10-0.9.2.jar
+
+
+Step 2:
+pig -x local
+raw_data = LOAD '201508_trip_data.csv' USING PigStorage(',') AS (Trip_ID,Duration,Start_Date,Start_Station,Start_Terminal,End_Date,End_Station,End_Terminal,Bike_No,Subscriber_Type,Zip_Code);
+
+NoHeader = FILTER raw_data by $0 != 'Trip ID';
+
+data = FOREACH NoHeader GENERATE Trip_ID,Duration,Start_Date,Start_Station,Start_Terminal,End_Date,End_Station,End_Terminal,Bike_No,Subscriber_Type,Zip_Code;
+
+STORE data INTO 'hbase://default:trip' USING org.apache.pig.backend.hadoop.hbase.HBaseStorage('tripfam:Duration, tripfam:Start_Date, tripfam:Start_Station, tripfam:Start_Terminal, tripfam:End_Date, tripfam:End_Station, tripfam:End_Terminal, tripfam:Bike_No, tripfam:Subscriber_Type, tripfam:Zip_Code');
+
+Step 3:
+running:
+spark-shell --jars spark-hbase-connector.jar
+
+commands:
+import it.nerdammer.spark.hbase._
+import org.apache.spark.SparkContext
+import org.apache.spark.SparkConf
+import org.apache.spark.sql._
+import sqlContext.implicits._
+sc.hadoopConfiguration.set("spark.hbase.host", "thehost")
+val hBaseRDD = sc.hbaseTable[(String, String, String, String, String, String, String, String, String, String)]("trip").select("Duration","Start_Date","Start_Station","Start_Terminal","End_Date","End_Station","End_Terminal","Bike_No", "Subscriber_Type", "Zip_Code").inColumnFamily("tripfam")
+
+
+hBaseRDD.collect().take(10)
+
+Q1:List the top 10 most popular start stations i.e. those start stations that have the highest count in the dataset
+
+val startStation = hBaseRDD.map(x=>(x._3,1.toInt)).reduceByKey((x,y)=>(x+y)).sortBy(-_._2).take(10)
+
+Q2:List the top 10 most popular end stations i.e. those end stations that have the highest count in the dataset
+
+val endStation = hBaseRDD.map(x=>(x._6,1.toInt)).reduceByKey((x,y)=>(x+y)).sortBy(-_._2).take(10)
+
+Q3:List the top 10 start stations that have the highest average trip duration
+
+val countS = hBaseRDD.map(x => (x._3, 1.toInt)).reduceByKey((x,y)=>x+y)
+val sumD = hBaseRDD.map(x => (x._3, x._1.toInt)).reduceByKey((x,y)=>x+y)
+val aver = countS.join(sumD).map(x => (x._1, x._2._2/x._2._1))
+val av10 = aver.sortBy(-_._2).take(10)
+
+Q4:Which zip code has the highest number of stations (you can take either start or end stations)
+Here I take start station:
+val countS = hBaseRDD.map(x => (x._3,(x._10, 1.toInt))).reduceByKey((x,y) => (x._1, (x._2 + y._2))).sortBy(-_._2._2).take(1)
+
+Q5:What is the average duration of the trips that start from any station that contains 'San Francisco' in their name
+
+val sanf = hBaseRDD.filter(x => x._3.contains("San Francisco")).map(x => (x._3, (x._1.toInt, 1)))
+val count = sanf.reduceByKey((x,y) => (x._1 + y._1, x._2 + y._2)).map(x => ("San Francisco", (x._2._1, x._2._2)))
+val aver = count.reduceByKey((x,y) => (x._1 + y._1, x._2 + y._2)).map(x => (x._1, x._2._1.toDouble / x._2._2.toDouble))
+aver.foreach(println)
+
+Q6:Give the breakdown of subscriber type of users and the count of their occurrence.
+
+val subscriber = hBaseRDD.map(x => (x._9 , 1)).reduceByKey((x,y) => (x + y))
+subscriber.foreach(println)
+
+Q7:Give summary statistics for the duration column e.g. count, min, max, mean, stddev
+
+val duration = hBaseRDD.map(x => x._1)
+val stat = duration.toDF("d").describe("d").show()
+
+Results:
+Q1:
+startStation: Array[(String, Int)] = Array((San Francisco Caltrain (Townsend at 4th),26304), (San Francisco Caltrain 2 (330 Townsend),21758), (Harry Bridges Plaza (Ferry Building),17255), (Temporary Transbay Terminal (Howard at Beale),14436), (Embarcadero at Sansome,14158), (2nd at Townsend,14026), (Townsend at 7th,13752), (Steuart at Market,13687), (Market at 10th,11885), (Market at Sansome,11431))
+
+Q2:
+endStation: Array[(String, Int)] = Array((San Francisco Caltrain (Townsend at 4th),34810), (San Francisco Caltrain 2 (330 Townsend),22523), (Harry Bridges Plaza (Ferry Building),17810), (2nd at Townsend,15463), (Townsend at 7th,15422), (Embarcadero at Sansome,15065), (Market at Sansome,13916), (Steuart at Market,13617), (Temporary Transbay Terminal (Howard at Beale),12966), (Powell Street BART,10239))
+
+Q3:
+av10: Array[(String, Int)] = Array((University and Emerson,7906), (Redwood City Medical Center,5764), (San Jose Civic Center,5458), (Park at Olive,4850), (California Ave Caltrain Station,4009), (South Van Ness at Market,3884), (San Mateo County Center,3431), (Palo Alto Caltrain Station,3008), (San Antonio Shopping Center,2747), (Cowper at University,2483))
+
+Q4:
+countS: Array[(String, (String, Int))] = Array((San Francisco Caltrain (Townsend at 4th),(95035,26304)))
+
+Q5:
+(San Francisco,794.9321746418167)
+
+Q6:
+(Subscriber,310217)
+(Customer,43935)
+
+Q7:
++-------+------------------+
+|summary|                 d|
++-------+------------------+
+|  count|            354152|
+|   mean|1046.0326611172604|
+| stddev| 30016.93615692983|
+|    min|               100|
+|    max|              9999|
++-------+------------------+
+
+stat: Unit = ()
+
